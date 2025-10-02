@@ -1,0 +1,524 @@
+package Assignment_2;
+
+public class Main {
+    public static void main(String[] args) {
+        POSSystem system = new POSSystem();
+        system.run();
+    }
+}
+
+package Assignment_2;
+
+import java.text.DecimalFormat;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Scanner;
+
+public class POSSystem {
+    private Scanner sc = new Scanner(System.in);
+    private Map<Integer, Product> products = new LinkedHashMap<>();
+    private Map<Integer, Supplier> suppliers = new LinkedHashMap<>();
+    private Map<Integer, PurchaseOrder> purchaseOrders = new LinkedHashMap<>();
+    private Map<Integer, Sale> sales = new LinkedHashMap<>();
+
+    private int nextProductId = 1;
+    private int nextSupplierId = 1;
+    private int nextPOId = 1;
+    private int nextSaleId = 1;
+
+    private DecimalFormat df = new DecimalFormat("0.00");
+
+    public void run() {
+        boolean running = true;
+        while (running) {
+            printMenu();
+            int choice = readInt("Choose an option: ");
+            switch (choice) {
+                case 1: addProduct(); break;
+                case 2: addSupplier(); break;
+                case 3: createPurchaseOrder(); break;
+                case 4: receivePurchase(); break;
+                case 5: makeSale(); break;
+                case 6: displayInventory(); break;
+                case 7: displayAllPurchaseOrders(); break;
+                case 8: displayAllSales(); break;
+                case 9: running = false; System.out.println("Exiting. Goodbye!"); break;
+                default: System.out.println("Invalid option."); break;
+            }
+            System.out.println();
+        }
+    }
+
+    private void printMenu() {
+        System.out.println("==== Retail POS & Supplier Management ====");
+        System.out.println("1. Add Product");
+        System.out.println("2. Add Supplier");
+        System.out.println("3. Create Purchase Order");
+        System.out.println("4. Receive Purchase (mark PO received and update stock)");
+        System.out.println("5. Make Sale");
+        System.out.println("6. Display Inventory");
+        System.out.println("7. Display Purchase Orders (all)");
+        System.out.println("8. Display Sales (all)");
+        System.out.println("9. Exit");
+    }
+
+    // ---------- Menu actions ----------
+    private void addProduct() {
+        System.out.println("-- Add Product --");
+        String name = readNonEmptyString("Product name: ");
+        double price = readDoublePositive("Selling price: ");
+        int stock = readIntNonNegative("Initial stock qty: ");
+        TaxCategory tax = chooseTaxCategory();
+        Product p = new Product(nextProductId++, name, price, stock, tax);
+        products.put(p.getId(), p);
+        System.out.println("Product added: " + p);
+    }
+
+    private void addSupplier() {
+        System.out.println("-- Add Supplier --");
+        String name = readNonEmptyString("Supplier name: ");
+        String contact = readNonEmptyString("Contact info: ");
+        Supplier s = new Supplier(nextSupplierId++, name, contact);
+        suppliers.put(s.getId(), s);
+        System.out.println("Supplier added: " + s);
+    }
+
+    private void createPurchaseOrder() {
+        System.out.println("-- Create Purchase Order --");
+        if (suppliers.isEmpty()) { System.out.println("No suppliers exist. Please add one first."); return; }
+        Supplier s = chooseSupplier();
+        PurchaseOrder po = new PurchaseOrder(nextPOId++, s);
+        boolean adding = true;
+        while (adding) {
+            displayProductsBrief();
+            int pid = readInt("Enter product ID to add (or 0 to finish): ");
+            if (pid == 0) { adding = false; break; }
+            Product prod = products.get(pid);
+            if (prod == null) { System.out.println("Invalid product ID."); continue; }
+            int qty = readIntPositive("Quantity to order: ");
+            double cost = readDoublePositive("Cost price per unit: ");
+            po.addItem(new PurchaseOrderItem(prod, qty, cost));
+            System.out.println("Added: " + prod.getName() + " x" + qty + " @ " + df.format(cost));
+        }
+        if (po.getItems().isEmpty()) {
+            System.out.println("Purchase order empty. Cancelled.");
+            return;
+        }
+        purchaseOrders.put(po.getId(), po);
+        System.out.println("Purchase Order created with ID: " + po.getId());
+        printPurchaseReceipt(po, false);
+    }
+
+    private void receivePurchase() {
+        System.out.println("-- Receive Purchase --");
+        if (purchaseOrders.isEmpty()) { System.out.println("No purchase orders available."); return; }
+        displayPurchaseOrderSummaries();
+        int poid = readInt("Enter PO ID to receive: ");
+        PurchaseOrder po = purchaseOrders.get(poid);
+        if (po == null) { System.out.println("Invalid PO ID."); return; }
+        if (po.isReceived()) { System.out.println("PO already received."); return; }
+        // Update stock
+        for (PurchaseOrderItem it : po.getItems()) {
+            Product p = it.getProduct();
+            p.increaseStock(it.getQuantity());
+        }
+        po.markReceived();
+        System.out.println("PO received and stock updated.");
+        printPurchaseReceipt(po, true);
+    }
+
+    private void makeSale() {
+        System.out.println("-- Make Sale --");
+        if (products.isEmpty()) { System.out.println("No products available."); return; }
+        Sale sale = new Sale(nextSaleId++);
+        boolean adding = true;
+        while (adding) {
+            displayProductsBrief();
+            int pid = readInt("Enter product ID to sell (or 0 to finish): ");
+            if (pid == 0) { adding = false; break; }
+            Product prod = products.get(pid);
+            if (prod == null) { System.out.println("Invalid product ID."); continue; }
+            int qty = readIntPositive("Quantity: ");
+            if (qty > prod.getStock()) {
+                System.out.println("Insufficient stock for product '" + prod.getName() + "'. Available: " + prod.getStock());
+                continue; // prevent sale of that line
+            }
+            double unitPrice = readDoublePositiveWithDefault(
+                    "Unit price (press enter to use product selling price " + df.format(prod.getSellingPrice()) + "): ",
+                    prod.getSellingPrice());
+            sale.addItem(new SaleItem(prod, qty, unitPrice));
+        }
+        if (sale.getItems().isEmpty()) { System.out.println("Sale cancelled (no items)."); return; }
+        // Deduct stock
+        for (SaleItem it : sale.getItems()) {
+            Product p = it.getProduct();
+            boolean ok = p.decreaseStock(it.getQuantity());
+            if (!ok) {
+                System.out.println("Unexpected error: stock changed during sale for product " + p.getName());
+            }
+        }
+        sales.put(sale.getId(), sale);
+        printSaleBill(sale);
+    }
+
+    private void displayInventory() {
+        System.out.println("-- Inventory --");
+        if (products.isEmpty()) { System.out.println("No products."); return; }
+        System.out.println("ID | Name | Price | Stock | Tax");
+        for (Product p : products.values()) System.out.println(p);
+    }
+
+    private void displayAllPurchaseOrders() {
+        System.out.println("-- All Purchase Orders --");
+        if (purchaseOrders.isEmpty()) { System.out.println("No POs."); return; }
+        for (PurchaseOrder po : purchaseOrders.values()) {
+            System.out.println("PO#" + po.getId() + " | Supplier: " + po.getSupplier().getName() + " | Received: " + po.isReceived());
+        }
+    }
+
+    private void displayAllSales() {
+        System.out.println("-- All Sales --");
+        if (sales.isEmpty()) { System.out.println("No sales yet."); return; }
+        for (Sale s : sales.values()) {
+            System.out.println("Sale#" + s.getId() + " | Date: " + s.getDate() + " | Items: " + s.getItems().size() + " | Total: " + df.format(s.grandTotal()));
+        }
+    }
+
+    // ---------- Helpers & printing ----------
+    private void printSaleBill(Sale sale) {
+        System.out.println("\n----- SALE BILL -----");
+        System.out.println("Sale ID: " + sale.getId() + "    Date: " + sale.getDate());
+        System.out.println(String.format("%-4s %-20s %6s %8s %8s %8s","ID","Product","Qty","Price","Tax","Total"));
+        for (SaleItem it : sale.getItems()) {
+            System.out.println(String.format("%-4d %-20s %6d %8s %8s %8s",
+                    it.getProduct().getId(), it.getProduct().getName(), it.getQuantity(),
+                    df.format(it.getUnitPrice()), df.format(it.lineTax()), df.format(it.lineTotal())));
+        }
+        System.out.println("Net Amount: " + df.format(sale.netAmount()));
+        System.out.println("Total Tax: " + df.format(sale.totalTax()));
+        System.out.println("GRAND TOTAL: " + df.format(sale.grandTotal()));
+        System.out.println("---------------------\n");
+    }
+
+    private void printPurchaseReceipt(PurchaseOrder po, boolean received) {
+        System.out.println("\n----- PURCHASE " + (received?"RECEIPT":"ORDER VIEW") + " -----");
+        System.out.println("PO ID: " + po.getId() + "    Supplier: " + po.getSupplier().getName());
+        System.out.println(String.format("%-4s %-20s %6s %10s %10s","ID","Product","Qty","UnitCost","LineTotal"));
+        double subtotal = 0.0;
+        for (PurchaseOrderItem it : po.getItems()) {
+            System.out.println(String.format("%-4d %-20s %6d %10s %10s",
+                    it.getProduct().getId(), it.getProduct().getName(), it.getQuantity(),
+                    df.format(it.getCostPricePerUnit()), df.format(it.lineTotal())));
+            subtotal += it.lineTotal();
+        }
+        System.out.println("Subtotal: " + df.format(subtotal));
+        double tax = 0.0;
+        for (PurchaseOrderItem it : po.getItems()) {
+            tax += it.lineTotal() * it.getProduct().getTaxCategory().getRate();
+        }
+        System.out.println("Estimated Tax (per product tax rates): " + df.format(tax));
+        System.out.println("TOTAL: " + df.format(subtotal + tax));
+        System.out.println("Received: " + received);
+        System.out.println("-----------------------------\n");
+    }
+
+    private void displayProductsBrief() {
+        System.out.println("Available products:");
+        for (Product p : products.values()) System.out.println(p.getId() + ": " + p.getName() + " (Stock:" + p.getStock() + ", Price:" + df.format(p.getSellingPrice()) + ")");
+    }
+
+    private void displayPurchaseOrderSummaries() {
+        System.out.println("PO ID | Supplier | Received");
+        for (PurchaseOrder po : purchaseOrders.values()) System.out.println(po.getId() + " | " + po.getSupplier().getName() + " | " + po.isReceived());
+    }
+
+    private Supplier chooseSupplier() {
+        System.out.println("Suppliers:");
+        for (Supplier s : suppliers.values()) System.out.println(s.getId() + ": " + s.getName());
+        while (true) {
+            int sid = readInt("Enter supplier ID: ");
+            Supplier s = suppliers.get(sid);
+            if (s != null) return s;
+            System.out.println("Invalid supplier ID.");
+        }
+    }
+
+    private TaxCategory chooseTaxCategory() {
+        System.out.println("Choose tax category:");
+        int i = 1;
+        for (TaxCategory t : TaxCategory.values()) {
+            System.out.println(i++ + ". " + t.name() + " (" + t.label() + ")");
+        }
+        while (true) {
+            int choice = readInt("Enter choice: ");
+            if (choice >= 1 && choice <= TaxCategory.values().length) return TaxCategory.values()[choice-1];
+            System.out.println("Invalid choice.");
+        }
+    }
+
+    // ---------- Input validation helpers ----------
+    private String readNonEmptyString(String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            String s = sc.nextLine().trim();
+            if (!s.isEmpty()) return s;
+            System.out.println("Input cannot be empty.");
+        }
+    }
+
+    private int readInt(String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            String s = sc.nextLine().trim();
+            try { return Integer.parseInt(s); } catch (Exception e) { System.out.println("Enter a valid integer."); }
+        }
+    }
+
+    private int readIntPositive(String prompt) {
+        while (true) { int v = readInt(prompt); if (v > 0) return v; System.out.println("Enter a positive integer."); }
+    }
+
+    private int readIntNonNegative(String prompt) {
+        while (true) { int v = readInt(prompt); if (v >= 0) return v; System.out.println("Enter a non-negative integer."); }
+    }
+
+    private double readDoublePositive(String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            String s = sc.nextLine().trim();
+            try {
+                double v = Double.parseDouble(s);
+                if (v > 0) return v;
+            } catch (Exception e) {}
+            System.out.println("Enter a valid positive number.");
+        }
+    }
+
+    private double readDoublePositiveWithDefault(String prompt, double def) {
+        System.out.print(prompt);
+        String s = sc.nextLine().trim();
+        if (s.isEmpty()) return def;
+        try {
+            double v = Double.parseDouble(s);
+            if (v > 0) return v;
+        } catch (Exception e) {}
+        System.out.println("Invalid; using default " + df.format(def));
+        return def;
+    }
+}
+
+package Assignment_2;
+
+public class Product {
+    private final int id;
+    private String name;
+    private double sellingPrice;
+    private int stock;
+    private TaxCategory taxCategory;
+
+    public Product(int id, String name, double sellingPrice, int stock, TaxCategory taxCategory) {
+        this.id = id;
+        this.name = name;
+        this.sellingPrice = sellingPrice;
+        this.stock = stock;
+        this.taxCategory = taxCategory;
+    }
+
+    public int getId() { return id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public double getSellingPrice() { return sellingPrice; }
+    public void setSellingPrice(double sellingPrice) { this.sellingPrice = sellingPrice; }
+    public int getStock() { return stock; }
+    public void setStock(int stock) { this.stock = stock; }
+    public TaxCategory getTaxCategory() { return taxCategory; }
+    public void setTaxCategory(TaxCategory taxCategory) { this.taxCategory = taxCategory; }
+
+    // Business operations for inventory
+    public void increaseStock(int qty) {
+        if (qty > 0) this.stock += qty;
+    }
+
+    /**
+     * Attempt to decrease stock by qty.
+     * @param qty quantity to remove
+     * @return true if success (sufficient stock), false otherwise
+     */
+    public boolean decreaseStock(int qty) {
+        if (qty <= 0) return false;
+        if (qty <= stock) {
+            stock -= qty;
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public String toString() {
+        return String.format("%d | %s | Price: %.2f | Stock: %d | Tax: %s",
+                id, name, sellingPrice, stock, taxCategory.label());
+    }
+}
+
+package Assignment_2;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class PurchaseOrder {
+    private final int id;
+    private Supplier supplier;
+    private List<PurchaseOrderItem> items;
+    private boolean received;
+
+    public PurchaseOrder(int id, Supplier supplier) {
+        this.id = id;
+        this.supplier = supplier;
+        this.items = new ArrayList<>();
+        this.received = false;
+    }
+
+    public int getId() { return id; }
+    public Supplier getSupplier() { return supplier; }
+    public List<PurchaseOrderItem> getItems() { return items; }
+    public boolean isReceived() { return received; }
+
+    public void addItem(PurchaseOrderItem item) {
+        if (item != null) items.add(item);
+    }
+
+    public void markReceived() { this.received = true; }
+
+    public double subtotal() {
+        double s = 0.0;
+        for (PurchaseOrderItem it : items) s += it.lineTotal();
+        return s;
+    }
+}
+
+package Assignment_2;
+
+public class PurchaseOrderItem {
+    private Product product;
+    private int quantity;
+    private double costPricePerUnit;
+
+    public PurchaseOrderItem(Product product, int quantity, double costPricePerUnit) {
+        this.product = product;
+        this.quantity = quantity;
+        this.costPricePerUnit = costPricePerUnit;
+    }
+
+    public Product getProduct() { return product; }
+    public int getQuantity() { return quantity; }
+    public double getCostPricePerUnit() { return costPricePerUnit; }
+
+    public double lineTotal() { return quantity * costPricePerUnit; }
+}
+
+package Assignment_2;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+public class Sale {
+    private final int id;
+    private final Date date;
+    private List<SaleItem> items;
+
+    public Sale(int id) {
+        this.id = id;
+        this.date = new Date();
+        this.items = new ArrayList<>();
+    }
+
+    public int getId() { return id; }
+    public Date getDate() { return date; }
+    public List<SaleItem> getItems() { return items; }
+
+    public void addItem(SaleItem item) {
+        if (item != null) items.add(item);
+    }
+
+    public double netAmount() {
+        double s = 0.0;
+        for (SaleItem it : items) s += it.lineNet();
+        return s;
+    }
+
+    public double totalTax() {
+        double s = 0.0;
+        for (SaleItem it : items) s += it.lineTax();
+        return s;
+    }
+
+    public double grandTotal() {
+        return netAmount() + totalTax();
+    }
+}
+
+package Assignment_2;
+
+public class SaleItem {
+    private Product product;
+    private int quantity;
+    private double unitPrice;
+
+    public SaleItem(Product product, int quantity, double unitPrice) {
+        this.product = product;
+        this.quantity = quantity;
+        this.unitPrice = unitPrice;
+    }
+
+    public Product getProduct() { return product; }
+    public int getQuantity() { return quantity; }
+    public double getUnitPrice() { return unitPrice; }
+
+    public double lineNet() { return unitPrice * quantity; }
+    public double lineTax() { return lineNet() * product.getTaxCategory().getRate(); }
+    public double lineTotal() { return lineNet() + lineTax(); }
+}
+
+package Assignment_2;
+
+public class Supplier {
+    private final int id;
+    private String name;
+    private String contactInfo;
+
+    public Supplier(int id, String name, String contactInfo) {
+        this.id = id;
+        this.name = name;
+        this.contactInfo = contactInfo;
+    }
+
+    public int getId() { return id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    public String getContactInfo() { return contactInfo; }
+    public void setContactInfo(String contactInfo) { this.contactInfo = contactInfo; }
+
+    @Override
+    public String toString() {
+        return String.format("%d | %s | %s", id, name, contactInfo);
+    }
+}
+
+package Assignment_2;
+
+public enum TaxCategory {
+    EXEMPT(0.0),
+    FIVE_PERCENT(0.05),
+    TWELVE_PERCENT(0.12),
+    EIGHTEEN_PERCENT(0.18),
+    TWENTY_EIGHT_PERCENT(0.28);
+
+    private final double rate;
+
+    TaxCategory(double rate) { this.rate = rate; }
+    public double getRate() { return rate; }
+    public String label() { return String.format("%.0f%%", rate * 100); }
+}
+
+
